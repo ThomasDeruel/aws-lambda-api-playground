@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "awslabs.aws-serverless-mcp": {
+      "command": "/opt/homebrew/bin/uvx",
+      "args": ["awslabs.aws-serverless-mcp-server@latest"],
+      "env": {
+        "AWS_PROFILE": "default",
+        "AWS_REGION": "eu-west-3",
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    }
+  }
+}

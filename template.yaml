@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: API Gateway REST avec clé d'API, usage plan (throttling + quota) et header requis.
+
+Parameters:
+  NameStage:
+    Type: String
+    Default: prod
+    AllowedPattern: '^[A-Za-z0-9_]+$'
+    Description: Nom du stage API Gateway (prod, dev...).
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 256
+    Architectures:
+      - arm64   # ~20 % moins cher que x86 à performances égales
+
+Resources:
+
+  # 1. API Gateway REST
+  HelloWorldApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref NameStage
+      # Évite le stage parasite nommé "Stage" que SAM crée par défaut
+      OpenApiVersion: '3.0'
+      # La clé d'API se configure sous Auth (et non directement sous Properties)
+      Auth:
+        ApiKeyRequired: true   # header x-api-key exigé sur toutes les méthodes
+      # Modèle vide : sert uniquement à brancher le validateur de paramètres
+      # (sans validateur, API Gateway n'applique pas "Required: true" sur un header)
+      Models:
+        AucunCorps:
+          type: object
+
+  # 2. Clé d'API (valeur générée automatiquement par AWS quand Value est omis)
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: !Sub "${AWS::StackName}-api-key"
+      Description: !Sub "Clé d'accès à l'API ${AWS::StackName}"
+      Enabled: true
+
+  # 3. Plan d'utilisation (throttling + quota)
+  MonPlanUtilisation:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: !Sub "${AWS::StackName}-plan"
+      Description: "Limite le trafic des clients porteurs de la clé d'API"
+      Throttle:
+        RateLimit: 5     # requêtes/seconde en régime établi
+        BurstLimit: 10   # pic ponctuel toléré au-dessus du RateLimit
+      Quota:
+        Limit: 1000      # requêtes max...
+        Period: DAY      # ...par jour (DAY | WEEK | MONTH)
+      ApiStages:
+        - ApiId: !Ref HelloWorldApi
+          # Référence au stage généré par SAM : crée la dépendance
+          # et évite l'erreur "Invalid stage identifier" au premier déploiement
+          Stage: !Ref HelloWorldApi.Stage
+
+  # 4. Association clé <-> plan
+  AssociationPlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref MonPlanUtilisation
+
+  # 5. Fonction Lambda (renvoie "Hello World") + règle du header requis
+  HelloWorldFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        target: "es2020"
+        sourcemap: true
+        EntryPoints:
+          - app.ts
+    Properties:
+      CodeUri: hello_world/
+      Handler: app.handler   # fichier app.ts, fonction exportée "handler"
+      Runtime: nodejs24.x
+      Events:
+        MonEndpoint:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HelloWorldApi
+            Path: /blogs
+            Method: get
+            RequestParameters:
+              - method.request.header.X-Client-Id:
+                  Required: true
+                  Caching: false
+            # Active la validation des paramètres : requête sans le header => 400
+            RequestModel:
+              Model: AucunCorps
+              Required: false
+              ValidateBody: false
+              ValidateParameters: true
+
+  # Logs conservés 30 jours au lieu d'indéfiniment
+  HelloWorldLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${HelloWorldFunction}"
+      RetentionInDays: 30
+
+Outputs:
+  UrlEndpoint:
+    Description: URL de l'endpoint /blogs
+    Value: !Sub "https://${HelloWorldApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${NameStage}/blogs"
+  IdApiKey:
+    Description: "ID de la clé. Valeur : aws apigateway get-api-key --api-key <ID> --include-value --query value --output text"
+    Value: !Ref ApiKey
